@@ -60,11 +60,12 @@
   <section>
     <h2>Home</h2>
     <div id="home">—</div>
-    <button id="homeHere" disabled>Set home to where I am now</button>
+    <button id="homeHere" disabled>Make this home</button>
     <div class="row">
       <input id="homeInput" placeholder="37.87160, -122.27270" inputmode="decimal">
-      <button id="homeSave" disabled style="flex:none">Save</button>
+      <button id="homeSave" disabled style="flex:none">Make it home</button>
     </div>
+    <p id="ritualNote">Home is sealed on the device itself: after you choose a place here, press the WAYHOME button to pick its glyph and hold it to seal.</p>
     <p>Tip: in Google Maps, right-click (or long-press) your home to copy its coordinates.</p>
   </section>
 
@@ -80,6 +81,10 @@ const SERVICE = 'dc68c2d7-d4f8-466f-b225-025be6893389';
 const POSITION_CHAR = '8732c491-619e-4fcd-8a7d-be54e36ac17d';
 const HOME_CHAR = '60949155-f5ed-4533-afe4-311cdbc9fde2';
 const SEND_EVERY_MS = 2000;
+// Distances in miles where people think in miles; the device shows them briefly on wake
+const MILES_REGIONS = ['US', 'GB', 'LR', 'MM'];
+const region = (navigator.language || 'en-US').split('-')[1] || '';
+const UNITS = MILES_REGIONS.includes(region.toUpperCase()) ? 'mi' : 'km';
 
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder(), dec = new TextDecoder();
@@ -111,7 +116,7 @@ async function write(char, text) {
 async function sendPosition(force) {
   if (!here || !posChar) return;
   if (!force && Date.now() - lastSent < SEND_EVERY_MS) return;
-  if (await write(posChar, fmt(here.lat, here.lon))) lastSent = Date.now();
+  if (await write(posChar, `${fmt(here.lat, here.lon)},${UNITS}`)) lastSent = Date.now();
 }
 
 async function connect() {
@@ -141,14 +146,37 @@ async function connect() {
   }
 }
 
+// The home ritual: this page only proposes a place. It becomes home when the
+// person seals it on the device, so poll until the device reports it.
+let ritualTimer = null;
 async function saveHome(text) {
   const m = text.match(/(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/);
-  if (!m) { alert('Use the format: latitude, longitude'); return; }
+  if (!m) { $('ritualNote').textContent = 'Use the format: latitude, longitude'; return; }
   const value = fmt(parseFloat(m[1]), parseFloat(m[2]));
-  if (await write(homeChar, value)) {
-    $('home').textContent = value;
-    log('home saved: ' + value);
-  }
+  if (!(await write(homeChar, value))) return;
+  log('home proposed: ' + value);
+  $('ritualNote').textContent = 'Now on your WAYHOME: press the button to choose a glyph, then hold it to seal this as home.';
+  clearInterval(ritualTimer);
+  const started = Date.now();
+  ritualTimer = setInterval(async () => {
+    if (!homeChar || busy) return;
+    if (Date.now() - started > 65000) {
+      clearInterval(ritualTimer);
+      $('ritualNote').textContent = 'Not sealed, so home is unchanged. Try again whenever you like.';
+      return;
+    }
+    try {
+      busy = true;
+      const sealed = dec.decode(await homeChar.readValue());
+      if (sealed === value) {
+        clearInterval(ritualTimer);
+        $('home').textContent = sealed;
+        $('ritualNote').textContent = 'Home sealed.';
+        log('home sealed: ' + sealed);
+      }
+    } catch (e) { /* the device may be busy; try again next tick */ }
+    finally { busy = false; }
+  }, 1000);
 }
 
 $('connect').onclick = () => device?.gatt.connected ? device.gatt.disconnect() : connect();
