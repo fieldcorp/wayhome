@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WAYHOME Companion</title>
+<style>
+  :root {
+    --bg: #0c0c0e; --card: #18181b; --line: #2e2c2a;
+    --text: #ebe4d8; --dim: #827e78; --accent: #ffaa3c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px 48px; min-height: 100vh;
+    background: var(--bg); color: var(--text);
+    font: 16px/1.45 -apple-system, system-ui, sans-serif;
+  }
+  main { max-width: 420px; margin: 0 auto; display: grid; gap: 16px; }
+  h1 { font-size: 22px; letter-spacing: .2em; margin: 0 0 4px; }
+  p { margin: 0; color: var(--dim); }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px; display: grid; gap: 12px; }
+  h2 { font-size: 13px; letter-spacing: .12em; text-transform: uppercase; color: var(--dim); margin: 0; }
+  button {
+    font: inherit; font-weight: 600; padding: 14px; border-radius: 12px; cursor: pointer;
+    border: 1px solid var(--line); background: transparent; color: var(--text);
+  }
+  button.primary { background: var(--accent); color: #1a1206; border-color: var(--accent); }
+  button:disabled { opacity: .4; cursor: default; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; min-width: 0; }
+  input {
+    font: inherit; padding: 12px; border-radius: 10px; width: 100%;
+    background: var(--bg); color: var(--text); border: 1px solid var(--line);
+  }
+  .status { display: flex; align-items: center; gap: 8px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--dim); flex: none; }
+  .dot.on { background: var(--accent); }
+  code { color: var(--text); }
+  #log { font: 12px/1.5 ui-monospace, monospace; color: var(--dim); white-space: pre-wrap; max-height: 140px; overflow: auto; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>WAYHOME</h1>
+    <p>Keep this page open. It sends your phone's location to the keychain.</p>
+  </header>
+
+  <section>
+    <h2>Device</h2>
+    <div class="status"><span class="dot" id="dot"></span><span id="status">Not connected</span></div>
+    <button class="primary" id="connect">Connect to WAYHOME</button>
+  </section>
+
+  <section>
+    <h2>Your location</h2>
+    <div id="here">—</div>
+  </section>
+
+  <section>
+    <h2>Home</h2>
+    <div id="home">—</div>
+    <button id="homeHere" disabled>Set home to where I am now</button>
+    <div class="row">
+      <input id="homeInput" placeholder="37.87160, -122.27270" inputmode="decimal">
+      <button id="homeSave" disabled style="flex:none">Save</button>
+    </div>
+    <p>Tip: in Google Maps, right-click (or long-press) your home to copy its coordinates.</p>
+  </section>
+
+  <section>
+    <h2>Log</h2>
+    <div id="log"></div>
+  </section>
+</main>
+
+<script>
+// Must match firmware/WAYHOME/config.h
+const SERVICE = 'dc68c2d7-d4f8-466f-b225-025be6893389';
+const POSITION_CHAR = '8732c491-619e-4fcd-8a7d-be54e36ac17d';
+const HOME_CHAR = '60949155-f5ed-4533-afe4-311cdbc9fde2';
+const SEND_EVERY_MS = 2000;
+
+const $ = (id) => document.getElementById(id);
+const enc = new TextEncoder(), dec = new TextDecoder();
+let device, posChar, homeChar, here, lastSent = 0, busy = false;
+
+function log(msg) {
+  const t = new Date().toLocaleTimeString();
+  $('log').textContent = `${t}  ${msg}\n` + $('log').textContent;
+}
+
+function fmt(lat, lon) { return `${lat.toFixed(6)},${lon.toFixed(6)}`; }
+
+function setConnected(on) {
+  $('dot').classList.toggle('on', on);
+  $('status').textContent = on ? `Connected to ${device.name}` : 'Not connected';
+  $('connect').textContent = on ? 'Disconnect' : 'Connect to WAYHOME';
+  $('homeSave').disabled = !on;
+  $('homeHere').disabled = !on || !here;
+}
+
+async function write(char, text) {
+  if (!char || busy) return false;  // BLE allows one operation at a time
+  busy = true;
+  try { await char.writeValue(enc.encode(text)); return true; }
+  catch (e) { log('write failed: ' + e.message); return false; }
+  finally { busy = false; }
+}
+
+async function sendPosition(force) {
+  if (!here || !posChar) return;
+  if (!force && Date.now() - lastSent < SEND_EVERY_MS) return;
+  if (await write(posChar, fmt(here.lat, here.lon))) lastSent = Date.now();
+}
+
+async function connect() {
+  if (!navigator.bluetooth) {
+    alert('This browser has no Web Bluetooth. Use Chrome on Android/desktop, or the Bluefy browser on iPhone.');
+    return;
+  }
+  try {
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: 'WAYHOME' }], optionalServices: [SERVICE],
+    });
+    device.addEventListener('gattserverdisconnected', () => {
+      posChar = homeChar = null;
+      setConnected(false);
+      log('disconnected (press the device button, then Connect again)');
+    });
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE);
+    posChar = await service.getCharacteristic(POSITION_CHAR);
+    homeChar = await service.getCharacteristic(HOME_CHAR);
+    $('home').textContent = dec.decode(await homeChar.readValue());
+    setConnected(true);
+    log('connected');
+    sendPosition(true);
+  } catch (e) {
+    log('connect failed: ' + e.message);
+  }
+}
+
+async function saveHome(text) {
+  const m = text.match(/(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/);
+  if (!m) { alert('Use the format: latitude, longitude'); return; }
+  const value = fmt(parseFloat(m[1]), parseFloat(m[2]));
+  if (await write(homeChar, value)) {
+    $('home').textContent = value;
+    log('home saved: ' + value);
+  }
+}
+
+$('connect').onclick = () => device?.gatt.connected ? device.gatt.disconnect() : connect();
+$('homeHere').onclick = () => here && saveHome(fmt(here.lat, here.lon));
+$('homeSave').onclick = () => saveHome($('homeInput').value);
+
+navigator.geolocation.watchPosition(
+  (p) => {
+    here = { lat: p.coords.latitude, lon: p.coords.longitude };
+    $('here').textContent = `${fmt(here.lat, here.lon)}  (±${Math.round(p.coords.accuracy)} m)`;
+    $('homeHere').disabled = !posChar;
+    sendPosition(false);
+  },
+  (e) => { $('here').textContent = 'Location unavailable: ' + e.message; },
+  { enableHighAccuracy: true, maximumAge: 1000 },
+);
+// watchPosition only fires on movement; keep the device fed while standing still
+setInterval(() => sendPosition(false), SEND_EVERY_MS);
+</script>
+</body>
+</html>
