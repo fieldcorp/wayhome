@@ -100,7 +100,7 @@ function fmt(lat, lon) { return `${lat.toFixed(6)},${lon.toFixed(6)}`; }
 function setConnected(on) {
   $('dot').classList.toggle('on', on);
   $('status').textContent = on ? `Connected to ${device.name}` : 'Not connected';
-  $('connect').textContent = on ? 'Disconnect' : 'Connect to WAYHOME';
+  $('connect').textContent = on ? 'Disconnect' : (wantConnected ? 'Stop reconnecting' : 'Connect to WAYHOME');
   $('homeSave').disabled = !on;
   $('homeHere').disabled = !on || !here;
 }
@@ -119,6 +119,32 @@ async function sendPosition(force) {
   if (await write(posChar, `${fmt(here.lat, here.lon)},${UNITS}`)) lastSent = Date.now();
 }
 
+// Open the link to an already-chosen device. Used for the first connection and
+// for reconnecting by itself after the device sleeps and wakes.
+async function attach() {
+  const server = await device.gatt.connect();
+  const service = await server.getPrimaryService(SERVICE);
+  posChar = await service.getCharacteristic(POSITION_CHAR);
+  homeChar = await service.getCharacteristic(HOME_CHAR);
+  $('home').textContent = dec.decode(await homeChar.readValue());
+  setConnected(true);
+  sendPosition(true);
+}
+
+let wantConnected = false, retryTimer = null;
+function keepTrying() {
+  clearTimeout(retryTimer);
+  retryTimer = setTimeout(async () => {
+    if (!wantConnected || device?.gatt.connected) return;
+    try {
+      await attach();
+      log('reconnected');
+    } catch (e) {
+      keepTrying();  // still asleep: try again in a moment
+    }
+  }, 2000);
+}
+
 async function connect() {
   if (!navigator.bluetooth) {
     alert('This browser has no Web Bluetooth. Use Chrome on Android/desktop, or the Bluefy browser on iPhone.');
@@ -131,16 +157,17 @@ async function connect() {
     device.addEventListener('gattserverdisconnected', () => {
       posChar = homeChar = null;
       setConnected(false);
-      log('disconnected (press the device button, then Connect again)');
+      if (wantConnected) {
+        $('status').textContent = 'Asleep. Press the button on WAYHOME; it reconnects by itself';
+        log('device asleep, reconnecting when it wakes');
+        keepTrying();
+      } else {
+        log('disconnected');
+      }
     });
-    const server = await device.gatt.connect();
-    const service = await server.getPrimaryService(SERVICE);
-    posChar = await service.getCharacteristic(POSITION_CHAR);
-    homeChar = await service.getCharacteristic(HOME_CHAR);
-    $('home').textContent = dec.decode(await homeChar.readValue());
-    setConnected(true);
+    wantConnected = true;
+    await attach();
     log('connected');
-    sendPosition(true);
   } catch (e) {
     log('connect failed: ' + e.message);
   }
@@ -179,7 +206,16 @@ async function saveHome(text) {
   }, 1000);
 }
 
-$('connect').onclick = () => device?.gatt.connected ? device.gatt.disconnect() : connect();
+$('connect').onclick = () => {
+  if (device?.gatt.connected || wantConnected) {
+    wantConnected = false;  // a real goodbye: stop reconnecting
+    clearTimeout(retryTimer);
+    if (device?.gatt.connected) device.gatt.disconnect();
+    setConnected(false);
+  } else {
+    connect();
+  }
+};
 $('homeHere').onclick = () => here && saveHome(fmt(here.lat, here.lon));
 $('homeSave').onclick = () => saveHome($('homeInput').value);
 
